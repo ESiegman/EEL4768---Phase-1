@@ -1,5 +1,7 @@
-rars.jar
-dist/
-summary.md
-junit.xml
+# run_test.sh output.
+results/
+output/
+
 __pycache__/
+*.pyc
+.DS_Store

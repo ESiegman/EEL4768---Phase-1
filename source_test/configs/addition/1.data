@@ -1,0 +1,4 @@
+.data
+a: .word 10
+b: .word 20
+c: .word 0

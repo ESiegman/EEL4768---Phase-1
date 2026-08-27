@@ -9,91 +9,8 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  RARS_VERSION: v1.6
-  REQUIRED_CUSTOM_TESTS: 3
-
 jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-
-      - name: Byte-compile all Python
-        run: python -m compileall -q assembler.py tools/
-
-      - name: Assembler runs and reports usage
-        run: python assembler.py --help || python assembler.py || true
-
-      - name: Shellcheck the adapter
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck tools/run_student.sh || true
-
-  difftest:
-    needs: smoke
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.9', '3.12']
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Cache rars.jar
-        id: cache-rars
-        uses: actions/cache@v5
-        with:
-          path: rars.jar
-          key: rars-${{ env.RARS_VERSION }}
-
-      - name: Download RARS
-        if: steps.cache-rars.outputs.cache-hit != 'true'
-        run: make rars.jar
-
-      - name: Differential test
-        id: diff
-        env:
-          NO_COLOR: '1'
-        run: |
-          python tools/difftest.py \
-            --update-golden \
-            --require-custom "$REQUIRED_CUSTOM_TESTS" \
-            --summary-md summary.md \
-            --junit junit.xml \
-            | tee difftest.log
-
-      - name: Publish summary
-        if: always() && matrix.python-version == '3.12'
-        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload dumps for local inspection
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: dumps-py${{ matrix.python-version }}
-          path: |
-            golden/
-            summary.md
-            junit.xml
-            difftest.log
-          if-no-files-found: ignore
-          retention-days: 14
-
-  simulate:
-    needs: smoke
+  self-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -107,35 +24,93 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Cache rars.jar
-        id: cache-rars
-        uses: actions/cache@v5
-        with:
-          path: rars.jar
-          key: rars-${{ env.RARS_VERSION }}
-
-      - name: Download RARS
-        if: steps.cache-rars.outputs.cache-hit != 'true'
-        run: make rars.jar
-
-      - name: Simulate multiplication.s, gemm.s, sobel.s
-        env:
-          NO_COLOR: '1'
+      - name: Run the phase-1 self-check
+        id: check
         run: |
-          python tools/simulate.py --summary-md simulate_summary.md \
-            | tee simulate.log
+          set +e
+          ./run_test.sh ci
+          echo "status=$?" >> "$GITHUB_OUTPUT"
 
-      - name: Publish summary
+      - name: Build job summary
         if: always()
-        run: cat simulate_summary.md >> "$GITHUB_STEP_SUMMARY"
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
 
-      - name: Upload simulation log
+          summary_path = Path("results/ci.txt")
+          step_summary = os.environ["GITHUB_STEP_SUMMARY"]
+
+          if not summary_path.exists():
+              with open(step_summary, "a") as f:
+                  f.write(
+                      "# 🔴 Phase 1 self-check — crashed before producing a summary\n\n"
+                      "See the **Run the phase-1 self-check** step's log for the "
+                      "traceback (likely a missing RARS jar or a Java problem).\n"
+                  )
+              print("::error::self-check crashed before writing results/ci.txt")
+              raise SystemExit(0)
+
+          rows = []
+          for line in summary_path.read_text().splitlines():
+              m = re.match(r"^(PASS|FAIL)\s+(.*)$", line)
+              if not m:
+                  continue
+              status, rest = m.groups()
+              label, _, reason = rest.partition("  --  ")
+              label = re.sub(r"\s+", " ", label.strip())
+              rows.append((status, label, reason.strip()))
+
+          total = len(rows)
+          passed = sum(1 for status, _, _ in rows if status == "PASS")
+          emoji = "🟢" if total and passed == total else "🔴"
+
+          lines = [f"# {emoji} Phase 1 self-check — {passed}/{total} passing", ""]
+
+          for title, prefix in (("Assembly", "Assembly:"), ("Assembler", "Assembler:")):
+              items = [r for r in rows if r[1].startswith(prefix)]
+              if not items:
+                  continue
+              lines += [f"### {title}", "", "| | Check | Notes |", "|---|---|---|"]
+              for status, label, reason in items:
+                  icon = "✅" if status == "PASS" else "❌"
+                  lines.append(f"| {icon} | `{label}` | {reason} |")
+              lines.append("")
+
+          lines += [
+              "> This is a self-check, not the graded run: it covers configuration 1 "
+              "only, and the real Gradescope autograder also runs configurations 2 and 3.",
+              "",
+              "Full spliced programs, RARS memory dumps and your assembler's "
+              "generated files are attached below as the `self-check-output` artifact.",
+          ]
+
+          with open(step_summary, "a") as f:
+              f.write("\n".join(lines) + "\n")
+
+          name_re = re.compile(r"^(Assembly|Assembler):\s+(\S+)")
+          for status, label, reason in rows:
+              if status != "PASS":
+                  m = name_re.match(label)
+                  target = (
+                      f"{m.group(2)}.s" if m and m.group(1) == "Assembly" else "assembler.py"
+                  )
+                  print(f"::error file={target},title={label}::{reason or 'check failed'}")
+
+          print(f"::notice title=Phase 1 self-check::{passed}/{total} passing")
+
+      - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: simulate-log
+          name: self-check-output
           path: |
-            simulate_summary.md
-            simulate.log
+            results/
+            output/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Fail the job if any check failed
+        if: steps.check.outputs.status != '0'
+        run: exit 1

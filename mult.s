@@ -1,0 +1,9 @@
+.data
+a: .word 22
+b: .word 59
+c: .word 0
+
+.text
+.globl main
+
+main:
