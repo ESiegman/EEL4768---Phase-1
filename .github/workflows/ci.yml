@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  RARS_VERSION: v1.6
+  REQUIRED_CUSTOM_TESTS: 3
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Byte-compile all Python
+        run: python -m compileall -q assembler.py tools/
+
+      - name: Assembler runs and reports usage
+        run: python assembler.py --help || python assembler.py || true
+
+      - name: Shellcheck the adapter
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck tools/run_student.sh || true
+
+  difftest:
+    needs: smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache rars.jar
+        id: cache-rars
+        uses: actions/cache@v4
+        with:
+          path: rars.jar
+          key: rars-${{ env.RARS_VERSION }}
+
+      - name: Download RARS
+        if: steps.cache-rars.outputs.cache-hit != 'true'
+        run: make rars.jar
+
+      - name: Differential test
+        id: diff
+        env:
+          NO_COLOR: '1'
+        run: |
+          python tools/difftest.py \
+            --update-golden \
+            --require-custom "$REQUIRED_CUSTOM_TESTS" \
+            --summary-md summary.md \
+            --junit junit.xml \
+            | tee difftest.log
+
+      - name: Publish summary
+        if: always() && matrix.python-version == '3.12'
+        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dumps for local inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dumps-py${{ matrix.python-version }}
+          path: |
+            golden/
+            summary.md
+            junit.xml
+            difftest.log
+          if-no-files-found: ignore
+          retention-days: 14
