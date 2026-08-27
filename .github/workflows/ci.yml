@@ -2,14 +2,12 @@ name: CI
 
 on:
   push:
-    branches: ['**']
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: true
 
 env:
   RARS_VERSION: v1.6
@@ -19,8 +17,8 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -43,20 +41,20 @@ jobs:
       matrix:
         python-version: ['3.9', '3.12']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Cache rars.jar
         id: cache-rars
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: rars.jar
           key: rars-${{ env.RARS_VERSION }}
@@ -83,7 +81,7 @@ jobs:
 
       - name: Upload dumps for local inspection
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dumps-py${{ matrix.python-version }}
           path: |
@@ -91,5 +89,53 @@ jobs:
             summary.md
             junit.xml
             difftest.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  simulate:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache rars.jar
+        id: cache-rars
+        uses: actions/cache@v5
+        with:
+          path: rars.jar
+          key: rars-${{ env.RARS_VERSION }}
+
+      - name: Download RARS
+        if: steps.cache-rars.outputs.cache-hit != 'true'
+        run: make rars.jar
+
+      - name: Simulate multiplication.s, gemm.s, sobel.s
+        env:
+          NO_COLOR: '1'
+        run: |
+          python tools/simulate.py --summary-md simulate_summary.md \
+            | tee simulate.log
+
+      - name: Publish summary
+        if: always()
+        run: cat simulate_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload simulation log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: simulate-log
+          path: |
+            simulate_summary.md
+            simulate.log
           if-no-files-found: ignore
           retention-days: 14

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import argparse
 import os
 import re
@@ -35,11 +34,6 @@ if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
 
 
 def normalize(text, kind, ignore_trailing_zeros=True):
-    """Turn a dump file into a canonical list of 32-bit ints.
-
-    Tolerates: 0x prefixes, upper/lower case, missing zero padding, blank
-    lines, comments, CRLF, and lines carrying an address prefix.
-    """
     words = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -160,7 +154,6 @@ def sext(v, bits):
 
 
 def decode(w):
-    """Return (mnemonic, ordered dict of field-name -> printable value)."""
     op = w & 0x7F
     fmt = OPFMT.get(op)
     rd, f3 = (w >> 7) & 0x1F, (w >> 12) & 0x7
@@ -236,7 +229,6 @@ def decode(w):
 
 
 def explain(exp, got):
-    """Side-by-side field diff of two words."""
     xor = exp ^ got
     bits = f"{xor:032b}".replace("0", ".").replace("1", "^")
     mn_e, fe = decode(exp)
@@ -258,9 +250,37 @@ def explain(exp, got):
     return out
 
 
-def run_rars(jar, src, outdir, mem_config=None, extra=()):
-    """Produce the four golden dumps. Text and data run separately so an
-    empty .data segment can't take the whole invocation down with it."""
+def explode_words_to_bytes(words, endian):
+    out = []
+    for w in words:
+        b = [(w >> s) & 0xFF for s in (0, 8, 16, 24)]
+        out.extend(b if endian == "little" else list(reversed(b)))
+    return out
+
+
+def reglanularize(path, fmt, endian):
+    if not path.exists():
+        return
+    words = normalize(
+        path.read_text(errors="replace"), fmt, ignore_trailing_zeros=False
+    )
+    bytes_ = explode_words_to_bytes(words, endian)
+    if fmt == "hex":
+        path.write_text("\n".join(f"0x{b:02x}" for b in bytes_) + "\n")
+    else:
+        path.write_text("\n".join(f"{b:08b}" for b in bytes_) + "\n")
+
+
+def run_rars(
+    jar,
+    src,
+    outdir,
+    mem_config=None,
+    extra=(),
+    data_granularity="byte",
+    instr_granularity="word",
+    endian="little",
+):
     outdir.mkdir(parents=True, exist_ok=True)
     base = ["java", "-jar", jar, "nc", "me", "ae1", "a", *extra]
     if mem_config:
@@ -282,6 +302,14 @@ def run_rars(jar, src, outdir, mem_config=None, extra=()):
         for line in (p.stderr + p.stdout).splitlines():
             if "Warning" in line and line not in warnings:
                 warnings.append(line.strip())
+
+    if data_granularity == "byte":
+        reglanularize(outdir / "data.hex", "hex", endian)
+        reglanularize(outdir / "data.bin", "bin", endian)
+    if instr_granularity == "byte":
+        reglanularize(outdir / "text.hex", "hex", endian)
+        reglanularize(outdir / "text.bin", "bin", endian)
+
     return True, "\n".join(warnings)
 
 
@@ -310,33 +338,35 @@ def read(path):
 
 
 def file_options(src):
-    """Per-test overrides written as a comment in the .s file, e.g.
-
-    #difftest: skip-data
-    #difftest: mc=CompactTextAtZero
-    """
-    opts = {"skip-data": False, "skip-bin": False, "mc": None}
+    opts = {
+        "skip-data": False,
+        "skip-bin": False,
+        "mc": None,
+        "data-granularity": None,
+        "instr-granularity": None,
+        "endian": None,
+    }
     for line in src.read_text(errors="replace").splitlines()[:25]:
         m = re.match(r"\s*#\s*difftest:\s*(.+)", line)
         if not m:
             continue
         for tok in m.group(1).split():
-            if tok.startswith("mc="):
-                opts["mc"] = tok[3:]
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                if k in opts:
+                    opts[k] = v
             elif tok in opts:
                 opts[tok] = True
     return opts
 
 
 def load(path, kind, ignore_trailing_zeros):
-    """Read + normalize, returning None if the file simply isn't there."""
     if not path.exists():
         return None
     return normalize(path.read_text(errors="replace"), kind, ignore_trailing_zeros)
 
 
 def word_diff(exp, got, seg, base, max_diffs):
-    """Explain the differences between two normalized word lists."""
     lines = []
     if len(exp) != len(got):
         lines.append(
@@ -373,13 +403,6 @@ def word_diff(exp, got, seg, base, max_diffs):
 
 
 def compare(src, golden_dir, mine_dir, args, opts):
-    """Three-way compare for one test case.
-
-    Returns (status, lines, stats) where status is "pass" or "fail".
-    stats records which oracles were available and whether RARS agreed with
-    the committed reference, which is what tells you the pipeline's golden
-    output is trustworthy in the first place.
-    """
     lines = []
     ok = True
     stats = {"sol_files": 0, "sol_mismatch": 0}
@@ -444,7 +467,6 @@ def discover(paths, filt):
 
 
 def write_junit(path, results):
-    """Minimal JUnit XML so CI renders a real test report."""
     import xml.etree.ElementTree as ET
 
     ts = ET.Element(
@@ -464,7 +486,6 @@ def write_junit(path, results):
 
 
 def write_summary(path, results, custom_count, required):
-    """GitHub step-summary markdown. No API token needed."""
     icon = {"pass": "✅", "fail": "❌", "error": "💥"}
     n_pass = sum(1 for r in results if r["status"] == "pass")
     rows = ["| | test | source | result |", "|---|---|---|---|"]
@@ -492,9 +513,7 @@ ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    ap = argparse.ArgumentParser()
     ap.add_argument(
         "paths",
         nargs="*",
@@ -518,6 +537,29 @@ def main():
     )
     ap.add_argument(
         "--mem-config", default=None, help="RARS 'mc' value, e.g. CompactTextAtZero"
+    )
+    ap.add_argument(
+        "--data-granularity",
+        choices=["byte", "word"],
+        default="byte",
+        help="format of the .data golden dump: phase_1.pdf specifies "
+        "byte-per-line (default); pass 'word' if the committed "
+        "*_sol_data.*.txt files turn out to be RARS's native "
+        "word-per-line format instead",
+    )
+    ap.add_argument(
+        "--instr-granularity",
+        choices=["byte", "word"],
+        default="word",
+        help="format of the .text golden dump (default: word/entry-"
+        "per-line, i.e. one instruction per line)",
+    )
+    ap.add_argument(
+        "--endian",
+        choices=["little", "big"],
+        default="little",
+        help="byte order used when exploding a word into bytes "
+        "for byte-granularity output (RV32I is little-endian)",
     )
     ap.add_argument("--text-base", type=lambda s: int(s, 0), default=0x00400000)
     ap.add_argument("--data-base", type=lambda s: int(s, 0), default=0x10010000)
@@ -563,11 +605,22 @@ def main():
         where = "root" if src.parent.resolve() == ROOT else src.parent.name
         opts = file_options(src)
         mem_config = opts["mc"] or args.mem_config
+        data_gran = opts["data-granularity"] or args.data_granularity
+        instr_gran = opts["instr-granularity"] or args.instr_granularity
+        endian = opts["endian"] or args.endian
         gdir = golden_root / where / name
 
         if args.update_golden or not gdir.exists():
             shutil.rmtree(gdir, ignore_errors=True)
-            okg, err = run_rars(args.rars, src, gdir, mem_config)
+            okg, err = run_rars(
+                args.rars,
+                src,
+                gdir,
+                mem_config,
+                data_granularity=data_gran,
+                instr_granularity=instr_gran,
+                endian=endian,
+            )
             if okg and err:
                 print(
                     f"{YEL}WARN {RESET} {name}: RARS warnings on the golden run "
