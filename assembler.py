@@ -301,6 +301,8 @@ def write_outputs(assembly_file, instruction_bytes, data_bytes):
 
     write_lines(os.path.join(directory, f"{name}.hex.txt"), instruction_bytes)
     write_lines(os.path.join(directory, f"{name}.bin.txt"), instruction_bytes, binary=True)
+    write_lines(os.path.join(directory, f"{name}_instr.hex.txt"), instruction_bytes)
+    write_lines(os.path.join(directory, f"{name}_instr.bin.txt"), instruction_bytes, binary=True)
     write_lines(os.path.join(directory, f"{name}_data.hex.txt"), data_bytes)
     write_lines(os.path.join(directory, f"{name}_data.bin.txt"), data_bytes, binary=True)
 
